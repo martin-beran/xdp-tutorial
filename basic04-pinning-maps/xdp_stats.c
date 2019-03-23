@@ -9,6 +9,8 @@ static const char *__doc__ = "XDP stats program\n"
 #include <getopt.h>
 
 #include <locale.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -191,6 +193,14 @@ static void stats_collect(int map_fd, __u32 map_type,
 	}
 }
 
+#ifndef PATH_MAX
+#define PATH_MAX	4096
+#endif
+
+char filename[PATH_MAX];
+
+struct stat map_stat_old;
+
 static void stats_poll(int map_fd, __u32 map_type, int interval)
 {
 	struct stats_record prev, record = { 0 };
@@ -202,21 +212,35 @@ static void stats_poll(int map_fd, __u32 map_type, int interval)
 	stats_collect(map_fd, map_type, &record);
 	usleep(1000000/4);
 
+	if (fstat(map_fd, &map_stat_old) != 0) {
+		fprintf(stderr, "ERR: calling fstat on map file\n");
+		return;
+	}
 	while (1) {
-		prev = record; /* struct copy */
+		struct stat map_stat_new;
+		if (stat(filename, &map_stat_new) != 0) {
+			fprintf(stderr, "ERR: calling stat on map file\n");
+			return;
+		}
+		if (map_stat_old.st_ino == map_stat_new.st_ino &&
+		    map_stat_old.st_mtime == map_stat_new.st_mtime)
+		{
+			prev = record; /* struct copy */
+		} else {
+			close(map_fd);
+			map_fd = bpf_obj_get(filename);
+			memset(&prev, 0, sizeof(prev));
+			map_stat_old = map_stat_new;
+			fprintf(stdout, "\nMap file reopen\n\n");
+		}
 		stats_collect(map_fd, map_type, &record);
 		stats_print(&record, &prev);
 		sleep(interval);
 	}
 }
 
-#ifndef PATH_MAX
-#define PATH_MAX	4096
-#endif
-
 int open_bpf_map_file(const char *pin_dir, const char *mapname)
 {
-	char filename[PATH_MAX];
 	int len, fd;
 
 	len = snprintf(filename, PATH_MAX, "%s/%s", pin_dir, mapname);
