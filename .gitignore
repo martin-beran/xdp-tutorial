@@ -53,5 +53,7 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-# The xdp_loader program
+# Programs
 xdp_loader
+xdp*_stats
+xdp_pass_user
