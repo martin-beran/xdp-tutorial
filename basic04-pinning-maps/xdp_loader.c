@@ -66,26 +66,110 @@ static const struct option_wrapper long_options[] = {
 
 const char *pin_basedir =  "/sys/fs/bpf";
 const char *map_name    =  "xdp_stats_map";
+char pin_dir[PATH_MAX];
+char map_filename[PATH_MAX];
 
-/* Pinning maps under /sys/fs/bpf in subdir */
-int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, const char *subdir)
+struct bpf_object *load_bpf_and_reuse_pinned(struct config *cfg, const char *subdir)
 {
-	char map_filename[PATH_MAX];
-	char pin_dir[PATH_MAX];
-	int err, len;
+	struct bpf_object *bpf_obj;
+	struct bpf_program *bpf_prog;
+	struct bpf_map *map;
+	int err, prog_fd = -1, len, offload_ifindex = 0;
+	enum bpf_attach_type expected_attach_type;
+	struct bpf_object_open_attr open_attr = {
+                .file           = cfg->filename,
+                .prog_type      = BPF_PROG_TYPE_XDP,
+        };
+
+
+	if (cfg->xdp_flags & XDP_FLAGS_HW_MODE)
+                offload_ifindex = cfg->ifindex;
+
+	bpf_obj = bpf_object__open_xattr(&open_attr);
+	if (!bpf_obj) {
+		fprintf(stderr, "ERR: opening file: %s\n", cfg->filename);
+		return NULL;
+	}
 
 	len = snprintf(pin_dir, PATH_MAX, "%s/%s", pin_basedir, subdir);
 	if (len < 0) {
 		fprintf(stderr, "ERR: creating pin dirname\n");
-		return EXIT_FAIL_OPTION;
+		return NULL;
 	}
-
 	len = snprintf(map_filename, PATH_MAX, "%s/%s/%s",
 		       pin_basedir, subdir, map_name);
 	if (len < 0) {
 		fprintf(stderr, "ERR: creating map_name\n");
-		return EXIT_FAIL_OPTION;
+		return NULL;
 	}
+
+	int pinned_map_fd = bpf_obj_get(map_filename);
+	if (pinned_map_fd >= 0) {
+		fprintf(stderr, "Reuse map %s\n", map_name);
+		struct bpf_map *map = bpf_object__find_map_by_name(bpf_obj, map_name);
+		bpf_map__reuse_fd(map, pinned_map_fd);
+	}
+
+	bpf_object__for_each_program(bpf_prog, bpf_obj) {
+                /*
+                 * If type is not specified, try to guess it based on
+                 * section name.
+                 */
+		bpf_program__set_ifindex(bpf_prog, offload_ifindex);
+		expected_attach_type = 0;
+
+                bpf_program__set_type(bpf_prog, BPF_PROG_TYPE_XDP);
+                bpf_program__set_expected_attach_type(bpf_prog,
+                                                      expected_attach_type);
+        }
+
+	bpf_object__for_each_map(map, bpf_obj) {
+                if (!bpf_map__is_offload_neutral(map))
+                        bpf_map__set_ifindex(map, offload_ifindex);
+        }
+
+
+	if (bpf_object__load(bpf_obj)) {
+		fprintf(stderr, "ERR: object load\n");
+		return NULL;
+	}
+	
+	if (cfg->progsec[0])
+                /* Find a matching BPF prog section name */
+                bpf_prog = bpf_object__find_program_by_title(bpf_obj, cfg->progsec);    
+        else
+                /* Find the first program */
+                bpf_prog = bpf_program__next(NULL, bpf_obj);
+
+        if (!bpf_prog) {
+                fprintf(stderr, "ERR: couldn't find a program in ELF section '%s'\n", cfg->progsec);
+                exit(EXIT_FAIL_BPF);
+        }
+
+	strncpy(cfg->progsec, bpf_program__title(bpf_prog, false), sizeof(cfg->progsec));
+
+        prog_fd = bpf_program__fd(bpf_prog);
+        if (prog_fd <= 0) {
+                fprintf(stderr, "ERR: bpf_program__fd failed\n");
+                exit(EXIT_FAIL_BPF);
+        }
+
+        /* At this point: BPF-progs are (only) loaded by the kernel, and prog_fd
+         * is our select file-descriptor handle. Next step is attaching this FD
+         * to a kernel hook point, in this case XDP net_device link-level hook.
+         */
+        err = xdp_link_attach(cfg->ifindex, cfg->xdp_flags, prog_fd);
+        if (err)
+                exit(err);
+
+        return bpf_obj;
+
+}
+
+/* Pinning maps under /sys/fs/bpf in subdir */
+int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, const char *subdir)
+{
+	int err;
 
 	/* Existing/previous XDP prog might not have cleaned up */
 	if (access(map_filename, F_OK ) != -1 ) {
@@ -137,7 +221,8 @@ int main(int argc, char **argv)
 		return xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0);
 	}
 
-	bpf_obj = load_bpf_and_xdp_attach(&cfg);
+	bpf_obj = load_bpf_and_reuse_pinned(&cfg, cfg.ifname);
+	//bpf_obj = load_bpf_and_xdp_attach(&cfg);
 	if (!bpf_obj)
 		return EXIT_FAIL_BPF;
 
