@@ -240,7 +240,7 @@ setup()
         ip -n "$NS" addr add dev veth0 "${INSIDE_IP4}/${IP4_PREFIX_SIZE}"
         ip neigh add "$INSIDE_IP4" lladdr "$INSIDE_MAC" dev "$NS" nud permanent
         ip -n "$NS" neigh add "$OUTSIDE_IP4" lladdr "$OUTSIDE_MAC" dev veth0 nud permanent
-        ip -n "$NS" route add "${IP4_SUBNET}::/$IP4_FULL_PREFIX_SIZE" via "$OUTSIDE_IP4" dev veth0
+        ip -n "$NS" route add "${IP4_SUBNET}0.0/$IP4_FULL_PREFIX_SIZE" via "$OUTSIDE_IP4" dev veth0
         ENABLE_IPV4=1
     else
         ENABLE_IPV4=0
